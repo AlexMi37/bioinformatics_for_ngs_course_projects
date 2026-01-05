@@ -316,7 +316,7 @@ ps.genus.filt
 
 
 ```{r}
-# используем невероятно красивые и уникальные цвета с coolors 
+# используем цвета с coolors 
 
 colors_genus <- c(
   # Proteobacteria
