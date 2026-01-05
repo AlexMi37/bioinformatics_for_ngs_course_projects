@@ -1,0 +1,516 @@
+```{r}
+library(dada2); packageVersion("dada2")
+```
+```{r}
+path <- '/Users/aleksandrmilek/Desktop/HW3,4/trimmed/fastq_trimmed'
+list.files(path)
+```
+```{r}
+# Forward and reverse fastq filenames have format: SAMPLENAME_R1_001.fastq and SAMPLENAME_R2_001.fastq
+fnFs <- sort(list.files(path, pattern="_1.trimmed.fastq", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern="_2.trimmed.fastq", full.names = TRUE))
+# Extract sample names, assuming filenames have format: SAMPLENAME_XXX.fastq
+sample.names <- sapply(fnFs, function(f) gsub("_1\\.trimmed\\.fastq$", "", basename(f)))
+```
+
+```{r}
+plotQualityProfile(fnFs[1:2])
+```
+```{r}
+plotQualityProfile(fnRs[1:2])
+```
+```{r}
+filtFs <- file.path(path, "filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(path, "filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+```
+```{r}
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,200),
+              maxN=0, maxEE=c(2,2), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+head(out)
+```
+```{r}
+plotQualityProfile(filtFs[1:2])
+plotQualityProfile(filtRs[1:2])
+
+```
+
+
+```{r}
+errF <- learnErrors(filtFs, multithread=TRUE)
+```
+```{r}
+errR <- learnErrors(filtRs, multithread=TRUE)
+```
+```{r}
+plotErrors(errF, nominalQ=TRUE)
+plotErrors(errR, nominalQ=TRUE)
+```
+```{r}
+dadaFs <- dada(filtFs, err=errF, multithread=TRUE)
+```
+```{r}
+dadaRs <- dada(filtRs, err=errR, multithread=TRUE)
+```
+```{r}
+dadaFs[[1]]
+```
+```{r}
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+```
+```{r}
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+```
+```{r}
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+```
+```{r}
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+```
+```{r}
+sum(seqtab.nochim)/sum(seqtab)
+```
+```{r}
+getN <- function(x) sum(getUniques(x))
+
+track <- cbind(
+  out,
+  sapply(dadaFs, getN),
+  sapply(dadaRs, getN),
+  sapply(mergers, getN),
+  rowSums(seqtab.nochim)
+)
+
+colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
+rownames(track) <- sample.names
+
+track <- cbind(
+  track,
+  `loss_filtering_%` = round(100 * (1 - track[, "filtered"]  / track[, "input"]), 2),
+  `loss_denoisedF_%` = round(100 * (1 - track[, "denoisedF"] / track[, "filtered"]), 2),
+  `loss_denoisedR_%` = round(100 * (1 - track[, "denoisedR"] / track[, "denoisedF"]), 2),
+  `loss_merged_%`    = round(100 * (1 - track[, "merged"]    / track[, "denoisedR"]), 2),
+  `loss_chimera_%`   = round(100 * (1 - track[, "nonchim"]   / track[, "merged"]), 2)
+)
+
+track_df <- as.data.frame(track)
+num_cols <- sapply(track_df, is.numeric)
+track_mean <- as.data.frame(t(colMeans(track_df[, num_cols])))
+track_mean <- round(track_mean, 2)
+rownames(track_mean) <- "mean"
+colnames(track_mean) <- colnames(track_df)[num_cols]
+track_df[rownames(track_mean), colnames(track_mean)] <- track_mean[1, ]
+track <- track_df
+track
+
+```
+```{r}
+write.csv(track, "./track_table.csv", row.names = TRUE, quote = FALSE)
+```
+
+```{r}
+track.frac <- sweep(track, 1, track[,"input"], "/")
+final_reads <- track[,"nonchim"]
+mean(final_reads)
+ncol(seqtab.nochim)
+mean(rowSums(seqtab.nochim > 0))
+
+
+```
+```{r}
+mean(track[,"nonchim"])
+
+```
+```{r}
+min(track[,"nonchim"])
+
+```
+```{r}
+max(track[,"nonchim"])
+
+```
+
+```{r}
+seqtab.len <- seqtab.nochim[, nchar(colnames(seqtab.nochim)) %in% 250:256]
+
+dim(seqtab.nochim)
+dim(seqtab.len)
+
+table(nchar(getSequences(seqtab.len)))
+```
+
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "/Users/aleksandrmilek/Desktop/HW3,4/silva_nr_v138_train_set.fa", multithread=TRUE)
+```
+
+```{r}
+taxa.print <- taxa # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+```
+```{r}
+total_asv <- nrow(taxa)
+
+unclassified_genus <- sum(
+  is.na(taxa[, "Genus"]) |
+  taxa[, "Genus"] == ""
+)
+
+classified_genus <- total_asv - unclassified_genus
+pct_classified   <- round(100 * classified_genus / total_asv, 2)
+pct_unclassified <- round(100 * unclassified_genus / total_asv, 2)
+
+cat("Всего ASV:", total_asv, "\n")
+cat("Классифицировано до рода:", classified_genus, "(", pct_classified, "%)\n")
+cat("Не классифицировано до рода:", unclassified_genus, "(", pct_unclassified, "%)\n")
+```
+
+
+
+```{r}
+library(phyloseq); packageVersion("phyloseq")
+```
+
+```{r}
+library(Biostrings); packageVersion("Biostrings")
+```
+
+```{r}
+library(ggplot2); packageVersion("ggplot2")
+```
+
+```{r}
+theme_set(theme_bw())
+```
+```{r}
+
+meta <- read.csv("/Users/aleksandrmilek/Desktop/SraRunTable_2.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+```{r}
+samdf <- meta[, c("Run",
+                  "Sample.Name",
+                  "sample_type",
+                  "Collection_Date",
+                  "samp_size")]
+
+rownames(samdf) <- samdf$Run
+samdf$Run <- NULL
+
+samdf
+
+```
+```{r}
+ps <- phyloseq(
+  otu_table(seqtab.nochim, taxa_are_rows = FALSE),
+  sample_data(samdf),
+  tax_table(taxa)
+)
+
+# сначала переименовываем таксоны
+taxa_names(ps) <- paste0("sp", seq(ntaxa(ps)))
+
+# refseq: последовательности — из seqtab.nochim, имена — новые sp1...spN
+dna <- Biostrings::DNAStringSet(colnames(seqtab.nochim))
+names(dna) <- taxa_names(ps)
+
+ps <- merge_phyloseq(ps, dna)
+
+#saveRDS(ps, "ps_object.rds")
+ps
+
+
+```
+```{r}
+plot_richness(ps, x="sample_type", measures=c("Shannon", "Simpson"), color="sample_type")
+```
+
+```{r}
+plot_richness(ps, x="Sample.Name", measures=c("Shannon", "Simpson"), color="sample_type")
+```
+```{r}
+plot_richness(ps, x="Collection_Date", measures=c("Shannon", "Simpson"), color="sample_type")
+```
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20,
+         x = "sample_type",
+         fill = "Family")
+```
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20,
+         x = "Sample.Name",
+         fill = "Family")
+```
+```{r}
+top20 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:20]
+ps.top20 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top20 <- prune_taxa(top20, ps.top20)
+plot_bar(ps.top20,
+         x = "Collection_Date",
+         fill = "Family")
+```
+
+
+
+
+```{r}
+ps.blank <- subset_samples(ps, sample_type == "blank")
+ps.blank.top20 <- prune_taxa(top20, transform_sample_counts(ps.blank, function(x) x/sum(x)))
+plot_bar(ps.blank.top20, x = "Sample.Name", fill = "Family") +
+  ggtitle("blank")
+
+ps.sea <- subset_samples(ps, sample_type == "seawater")
+ps.sea.top20 <- prune_taxa(top20, transform_sample_counts(ps.sea, function(x) x/sum(x)))
+plot_bar(ps.sea.top20, x = "Sample.Name", fill = "Family") +
+  ggtitle("seawater")
+
+```
+```{r}
+library(phyloseq)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(vegan)
+library(pheatmap)
+library(microbiome)   
+ps <- readRDS("ps_object.rds")
+ps
+```
+```{r}
+library(phyloseq)
+
+ps <- readRDS("ps_object.rds")
+
+ps.genus <- tax_glom(ps, taxrank = "Genus")
+ps.genus
+
+ps.genus.rel <- transform_sample_counts(ps.genus, function(x) x / sum(x))
+
+mat <- as(otu_table(ps.genus.rel), "matrix")
+prev_genus <- colSums(mat > 0)
+max_abund_genus <- apply(mat, 2, max)
+
+keep_genus <- prev_genus >= (nrow(mat) / 2) & max_abund_genus >= 0.05
+
+ps.genus.filt <- prune_taxa(keep_genus, ps.genus.rel)
+ps.genus.filt
+
+```
+```{r}
+ps.genus
+ps.genus.filt
+```
+
+
+```{r}
+# используем невероятно красивые и уникальные цвета с coolors 
+
+colors_genus <- c(
+  # Proteobacteria
+  "Acinetobacter"        = "#171738",
+  "Amylibacter"          = "#3423A6",
+  "Hydrogenophaga"       = "#6CD4FF",
+  "OM43_clade"           = "#00B4D8",
+  "Paracoccus"           = "#78E0DC",
+  "Planktomarina"        = "#04724D",
+  "Pseudoalteromonas"    = "#228B22",
+  "Pseudohongiella"      = "#2E8B57",
+  "Pseudomonas"          = "#3CB371",
+  "Roseibacillus"        = "#66CDAA",
+  "SUP05_cluster"        = "#A6EBC9",
+  "Thioalkalimicrobium"  = "#2B9348",
+  "Vibrio"               = "#62AB37",
+  "Woeseia"              = "#5EEB5B",
+
+  # Bacteroidetes 
+  "Flavobacterium"       = "#CC5803",
+  "Lentimonas"           = "#FF7B00",
+  "NS5_marine_group"     = "#FF9500",
+
+  # Other
+  "Candidatus_Actinomarina"  = "#5A189A",
+  "Candidatus_Nitrosopumilus"= "#612940",
+  "Candidatus_Thiobios"      = "#9D6381",
+  "Subgroup_10"              = "#C77DFF",
+  "Thermocrinis"             = "#F4AC32",
+  "Thermodesulfovibrio"      = "#FFD131",
+  "Synechococcus_CC9902"     = "#FFC2B4"
+)
+
+
+
+```
+
+
+```{r}
+genus_df <- psmelt(ps.genus.filt)
+
+ggplot(genus_df,
+       aes(x = Sample.Name, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = colors_genus) +
+  xlab("Sample") +
+  ylab("Relative abundance per sample") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+
+ggplot(genus_df,
+       aes(x = sample_type, y = Abundance, fill = Genus)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = colors_genus) +
+  xlab("Sample type") +
+  ylab("Sum of genus abundances\n(across all samples of this type)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+```
+```{r}
+library(microbiome)
+library(pheatmap)
+
+ps.genus.clr <- microbiome::transform(ps.genus.filt, "clr")
+
+clr_mat <- as(otu_table(ps.genus.clr), "matrix")
+if (!taxa_are_rows(ps.genus.clr)) {
+  clr_mat <- t(clr_mat)
+}
+
+ann <- data.frame(sample_type = sample_data(ps.genus.filt)$sample_type)
+rownames(ann) <- rownames(sample_data(ps.genus.filt))
+
+pheatmap(
+  clr_mat,
+  annotation_col = ann
+)
+
+```
+```{r}
+otu <- as(otu_table(ps.genus), "matrix")
+if (taxa_are_rows(ps.genus)) {
+  otu <- t(otu)
+}
+alpha_observed <- rowSums(otu > 0)
+alpha_shannon  <- vegan::diversity(otu, index = "shannon")
+alpha_simpson  <- vegan::diversity(otu, index = "simpson")
+
+alpha_df <- data.frame(
+  Observed = alpha_observed,
+  Shannon  = alpha_shannon,
+  Simpson  = alpha_simpson
+)
+alpha_df$Sample <- rownames(alpha_df)
+
+```
+```{r}
+
+meta_raw <- sample_data(ps.genus)
+
+meta <- as.data.frame(meta_raw@.Data)
+rownames(meta) <- rownames(meta_raw)
+colnames(meta) <- meta_raw@names
+meta$Sample <- rownames(meta)
+
+alpha_all <- dplyr::left_join(meta, alpha_df, by = "Sample")
+
+alpha_long <- tidyr::pivot_longer(
+  alpha_all,
+  cols = c("Observed", "Shannon", "Simpson"),
+  names_to = "metric",
+  values_to = "value"
+)
+
+```
+
+
+```{r}
+alpha_colors <- c(
+  blank      = "#171738",  
+  chimney    = "#228B22", 
+  seawater   = "#6CD4FF", 
+  vent_fluid = "#FF9500"   
+)
+
+ggplot(alpha_long,
+       aes(x = sample_type, y = value, fill = sample_type)) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.5) +
+  geom_jitter(width = 0.2) +
+  facet_wrap(~ metric, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = alpha_colors) +
+  ylab("Alpha diversity") +
+  xlab("Sample type") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+```{r}
+alpha_split <- split(alpha_long, alpha_long$metric)
+
+kw_fun <- function(df) {
+  test <- kruskal.test(value ~ sample_type, data = df)
+  data.frame(
+    metric   = unique(df$metric),
+    statistic = unname(test$statistic),
+    p.value   = test$p.value
+  )
+}
+
+alpha_kw <- do.call(rbind, lapply(alpha_split, kw_fun))
+alpha_kw
+
+```
+```{r}
+dist_bc <- phyloseq::distance(ps.genus, method = "bray")
+dist_bc
+```
+```{r}
+meta_df <- as.data.frame(sample_data(ps.genus))
+
+bd <- betadisper(dist_bc, meta_df$sample_type)
+bd
+permutest(bd)
+```
+```{r}
+meta_df <- data.frame(sample_data(ps.genus))
+meta_df$sample_type <- factor(meta_df$sample_type)
+adon_bc <- adonis2(dist_bc ~ sample_type, data = meta_df)
+adon_bc
+```
+```{r}
+alpha_colors <- c(
+  blank      = "#171738",
+  chimney    = "#228B22",
+  seawater   = "#6CD4FF",
+  vent_fluid = "#FF9500"
+)
+
+ord_bc <- ordinate(ps.genus, method = "PCoA", distance = "bray")
+
+plot_ordination(ps.genus, ord_bc, color = "sample_type") +
+  geom_point(size = 3) +
+  scale_color_manual(values = alpha_colors) +
+  xlab("PCoA1") +
+  ylab("PCoA2")
+```
+```{r}
+dist_mat <- as.matrix(dist_bc)
+pheatmap(
+  dist_mat,
+  annotation_col = ann
+)
+
+
+```
+
